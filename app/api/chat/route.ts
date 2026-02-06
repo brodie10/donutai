@@ -2,13 +2,18 @@ import { NextResponse } from 'next/server';
 import prisma from '@/lib/db';
 import { z } from 'zod';
 import { rateLimit } from '@/lib/ratelimit';
+import { streamText, StreamData } from 'ai';
+import { openai } from '@ai-sdk/openai';
 
 // Force Node.js runtime for Vercel
 export const runtime = 'nodejs';
 
 // Validation Schema
 const chatSchema = z.object({
-  message: z.string().min(1, 'Message is required').max(2000, 'Message is too long'),
+  messages: z.array(z.object({
+    role: z.enum(['user', 'assistant', 'system']),
+    content: z.string(),
+  })),
   conversationId: z.string().uuid().optional().nullable(),
 });
 
@@ -69,7 +74,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: validation.error.message }, { status: 400 });
     }
 
-    const { message, conversationId } = validation.data;
+    const { messages, conversationId } = validation.data;
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
     if (!OPENAI_API_KEY) {
@@ -81,10 +86,14 @@ export async function POST(req: Request) {
 
     // 1. Create/Get conversation
     if (!currentConversationId) {
+      // Get the last user message to use as title
+      const lastUserMessage = messages.slice().reverse().find(m => m.role === 'user');
+      const title = lastUserMessage ? lastUserMessage.content.substring(0, 30) : 'New Conversation';
+
       const conversation = await prisma.conversation.create({
         data: {
           userId,
-          title: message.substring(0, 30),
+          title,
         },
       });
       currentConversationId = conversation.id;
@@ -98,63 +107,40 @@ export async function POST(req: Request) {
       }
     }
 
-    // 2. Save User Message
-    await prisma.message.create({
-      data: {
-        role: 'user',
-        content: message,
-        conversationId: currentConversationId,
-      },
-    });
-
-    // 3. Fetch History
-    const history = await prisma.message.findMany({
-      where: { conversationId: currentConversationId },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    const apiMessages = history.map((msg) => ({
-      role: msg.role as 'user' | 'assistant',
-      content: msg.content,
-    }));
-
-    // 4. Call OpenAI API
-    const openAiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-        messages: apiMessages,
-        temperature: 0.7,
-        max_tokens: 1024,
-      }),
-    });
-
-    if (!openAiResponse.ok) {
-      const errorData = await openAiResponse.json();
-      console.error('OpenAI API Error:', errorData);
-      return NextResponse.json({ error: 'Failed to fetch from OpenAI' }, { status: 500 });
+    // 2. Save User Message (the last one in the array)
+    const lastMessage = messages[messages.length - 1];
+    if (lastMessage.role === 'user') {
+      await prisma.message.create({
+        data: {
+          role: 'user',
+          content: lastMessage.content,
+          conversationId: currentConversationId,
+        },
+      });
     }
 
-    const data = await openAiResponse.json();
-    const replyContent = data.choices[0].message.content;
+    // 3. Prepare StreamData to return conversationId
+    const data = new StreamData();
+    data.append({ conversationId: currentConversationId });
 
-    // 5. Save Assistant Message
-    await prisma.message.create({
-      data: {
-        role: 'assistant',
-        content: replyContent,
-        conversationId: currentConversationId,
+    // 4. Stream response
+    const result = streamText({
+      model: openai('gpt-4o-mini'),
+      messages,
+      onFinish: async ({ text }) => {
+        // 5. Save Assistant Message
+        await prisma.message.create({
+          data: {
+            role: 'assistant',
+            content: text,
+            conversationId: currentConversationId!,
+          },
+        });
+        await data.close();
       },
     });
 
-    return NextResponse.json({
-      reply: replyContent,
-      conversationId: currentConversationId,
-    });
+    return result.toDataStreamResponse({ data });
 
   } catch (error) {
     console.error('API Error:', error);

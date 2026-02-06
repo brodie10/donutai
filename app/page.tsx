@@ -2,11 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-
-type Message = {
-  role: 'user' | 'assistant';
-  content: string;
-};
+import { useChat } from 'ai/react';
 
 type Conversation = {
   id: string;
@@ -15,13 +11,33 @@ type Conversation = {
 };
 
 export default function Home() {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
+
+  const { messages, input, handleInputChange, handleSubmit, setMessages, isLoading, setInput, data } = useChat({
+    body: { conversationId },
+    initialMessages: [],
+    onFinish: () => {
+      // Optional: could trigger things after stream ends
+    },
+    onError: (error) => {
+      console.error('Chat error:', error);
+    }
+  });
+
+  // Watch for data from the stream to update conversationId
+  useEffect(() => {
+    if (data && data.length > 0) {
+      const lastData = data[data.length - 1] as any;
+      if (lastData && lastData.conversationId && lastData.conversationId !== conversationId) {
+        setConversationId(lastData.conversationId);
+        fetchConversations();
+      }
+    }
+  }, [data, conversationId]);
+
 
   // Load conversations on mount
   useEffect(() => {
@@ -45,7 +61,6 @@ export default function Home() {
   };
 
   const loadConversation = async (id: string) => {
-    setLoading(true);
     setConversationId(id);
     try {
       const res = await fetch(`/api/chat?conversationId=${id}`);
@@ -55,12 +70,12 @@ export default function Home() {
       }
       if (res.ok) {
         const data = await res.json();
+        // useChat expects messages to be mapped correctly if needed, but standard JSON usually works
+        // We might need to map 'content' and 'role' if they differ exactly, but they match here.
         setMessages(data);
       }
     } catch (err) {
       console.error('Failed to load conversation', err);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -109,59 +124,6 @@ export default function Home() {
     scrollToBottom();
   }, [messages]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!input.trim() || loading) return;
-
-    const userMessage = input.trim();
-    setInput('');
-    setMessages((prev) => [...prev, { role: 'user', content: userMessage }]);
-    setLoading(true);
-
-    try {
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: userMessage,
-          conversationId: conversationId,
-        }),
-      });
-
-      if (res.status === 401) {
-        router.push('/login');
-        return;
-      }
-
-      if (!res.ok) throw new Error('Failed to send message');
-
-      const data = await res.json();
-
-      if (data.reply) {
-        setMessages((prev) => [
-          ...prev,
-          { role: 'assistant', content: data.reply },
-        ]);
-      }
-
-      if (data.conversationId) {
-        setConversationId(data.conversationId);
-        // Refresh sidebar if it's a new conversation
-        if (!conversationId) {
-          fetchConversations();
-        }
-      }
-    } catch (error) {
-      console.error(error);
-      setMessages((prev) => [
-        ...prev,
-        { role: 'assistant', content: 'Error: Could not get response.' },
-      ]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   return (
     <div className="flex h-screen bg-gray-900 text-gray-100 font-sans">
 
@@ -183,8 +145,8 @@ export default function Home() {
               key={c.id}
               onClick={() => loadConversation(c.id)}
               className={`group w-full flex items-center justify-between px-4 py-3 rounded-lg text-sm cursor-pointer transition-colors ${conversationId === c.id
-                  ? 'bg-gray-800 text-pink-400'
-                  : 'text-gray-400 hover:bg-gray-900 hover:text-gray-200'
+                ? 'bg-gray-800 text-pink-400'
+                : 'text-gray-400 hover:bg-gray-900 hover:text-gray-200'
                 }`}
             >
               <span className="truncate flex-1 pr-2">{c.title || 'Untitled Chat'}</span>
@@ -252,8 +214,8 @@ export default function Home() {
             >
               <div
                 className={`max-w-[85%] rounded-2xl px-5 py-3.5 shadow-md ${msg.role === 'user'
-                    ? 'bg-gradient-to-r from-pink-600 to-purple-600 text-white'
-                    : 'bg-gray-800 border border-gray-700 text-gray-100'
+                  ? 'bg-gradient-to-r from-pink-600 to-purple-600 text-white'
+                  : 'bg-gray-800 border border-gray-700 text-gray-100'
                   }`}
               >
                 <div className="text-xs opacity-50 mb-1 font-semibold uppercase tracking-wide">
@@ -264,9 +226,10 @@ export default function Home() {
             </div>
           ))}
 
-          {loading && (
+          {isLoading && (
             <div className="flex justify-start">
               <div className="bg-gray-800 border border-gray-700 rounded-2xl px-5 py-4">
+                {/* Simple loading indicator while waiting for the first token */}
                 <div className="flex space-x-2 items-center">
                   <div className="w-2 h-2 bg-pink-500 rounded-full animate-bounce" />
                   <div className="w-2 h-2 bg-purple-500 rounded-full animate-bounce [animation-delay:0.2s]" />
@@ -287,14 +250,14 @@ export default function Home() {
             <input
               type="text"
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={handleInputChange}
               placeholder="Message DonutCyber..."
               className="w-full bg-gray-800 text-white placeholder-gray-500 rounded-2xl pl-5 pr-14 py-4 focus:outline-none focus:ring-2 focus:ring-pink-500/50 border border-gray-700 transition-all"
-              disabled={loading}
+              disabled={isLoading}
             />
             <button
               type="submit"
-              disabled={loading || !input.trim()}
+              disabled={isLoading || !input.trim()}
               className="absolute right-2 p-2.5 bg-gradient-to-r from-pink-600 to-purple-600 text-white rounded-xl hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg"
             >
               <svg
