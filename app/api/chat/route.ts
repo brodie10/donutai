@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import prisma from '@/lib/db';
 import { z } from 'zod';
 import { rateLimit } from '@/lib/ratelimit';
-import { streamText, StreamData } from 'ai';
+import { streamText } from 'ai';
 import { openai } from '@ai-sdk/openai';
 
 // Force Node.js runtime for Vercel
@@ -74,7 +74,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: validation.error.message }, { status: 400 });
     }
 
-    const { messages, conversationId } = validation.data;
+    const { messages } = validation.data;
+    // Prefer header, fallback to body (though we removed body from client)
+    const conversationId = req.headers.get('X-Conversation-Id') || validation.data.conversationId;
+
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
     if (!OPENAI_API_KEY) {
@@ -119,11 +122,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // 3. Prepare StreamData to return conversationId
-    const data = new StreamData();
-    data.append({ conversationId: currentConversationId });
-
-    // 4. Stream response
+    // 3. Stream response
     const result = streamText({
       model: openai('gpt-4o-mini'),
       messages,
@@ -136,11 +135,15 @@ export async function POST(req: Request) {
             conversationId: currentConversationId!,
           },
         });
-        await data.close();
       },
     });
 
-    return result.toDataStreamResponse({ data });
+    // Return standard stream response with custom header
+    return result.toTextStreamResponse({
+      headers: {
+        'X-Conversation-Id': currentConversationId!,
+      }
+    });
 
   } catch (error) {
     console.error('API Error:', error);

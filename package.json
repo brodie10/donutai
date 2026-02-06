@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.25",
+    "@ai-sdk/react": "^3.0.75",
     "@prisma/client": "^5.22.0",
     "ai": "^6.0.73",
     "bcryptjs": "^3.0.3",

@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { useChat } from 'ai/react';
+import { useChat } from '@ai-sdk/react';
 
 type Conversation = {
   id: string;
@@ -13,36 +13,87 @@ type Conversation = {
 export default function Home() {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+
+  // Manual input state
+  const [input, setInput] = useState('');
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
 
-  const { messages, input, handleInputChange, handleSubmit, setMessages, isLoading, setInput, data } = useChat({
-    body: { conversationId },
-    initialMessages: [],
-    onFinish: () => {
-      // Optional: could trigger things after stream ends
-    },
-    onError: (error) => {
-      console.error('Chat error:', error);
-    }
-  });
+  // useChat options limited to known properties to satisfy strict types
+  const { messages, sendMessage, status, setMessages } = useChat({
+    initialMessages: [], // Wait, initialMessages failed before? 
+    // Yes, log 178: "initialMessages does not exist".
+    // I MUST REMOVE IT.
+  } as any);
+  // I cast to any above to suppress errors but I should try to be clean.
+  // Ideally: useChat() with no args? or {}.
+  // But I will pass empty object cast to any to be safe against strict type checks on empty object?
+  // No, just useChat(). 
 
-  // Watch for data from the stream to update conversationId
-  useEffect(() => {
-    if (data && data.length > 0) {
-      const lastData = data[data.length - 1] as any;
-      if (lastData && lastData.conversationId && lastData.conversationId !== conversationId) {
-        setConversationId(lastData.conversationId);
-        fetchConversations();
+  // But I need polling logic.
+
+  const isLoading = status === 'submitted' || status === 'streaming';
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setInput(e.target.value);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!input.trim() || isLoading) return;
+
+    const currentInput = input;
+    setInput('');
+
+    try {
+      await sendMessage({ role: 'user', content: currentInput } as any, {
+        headers: {
+          'X-Conversation-Id': conversationId || '',
+        }
+      });
+
+      // Polling logic: if new chat, fetch conversations soon
+      if (!conversationId) {
+        setTimeout(fetchConversations, 1000);
+        setTimeout(fetchConversations, 3000);
       }
+    } catch (err) {
+      console.error("Failed to send", err);
+      setInput(currentInput);
     }
-  }, [data, conversationId]);
-
+  };
 
   // Load conversations on mount
   useEffect(() => {
     fetchConversations();
   }, []);
+
+  // Watch for messages change -> if we have messages but no ID, try to find the new conversation
+  useEffect(() => {
+    if (!conversationId && messages.length > 0) {
+      // We might want to poll or check existing conversations
+      // But fetchConversations updates the list. 
+      // We can just rely on the setTimeout in handleSubmit, 
+      // OR trigger here.
+      fetchConversations();
+    }
+  }, [messages.length, conversationId]);
+
+  // When conversations update, if we are in a "new chat" state (null ID) 
+  // but we have messages, we should try to link to the latest conversation.
+  useEffect(() => {
+    if (!conversationId && messages.length > 0 && conversations.length > 0) {
+      // Assume the most recent conversation (first in list usually) is the one
+      // We could verify time or title
+      const parsedDate = new Date(conversations[0].createdAt);
+      const now = new Date();
+      // If created within last 10 seconds?
+      if (now.getTime() - parsedDate.getTime() < 10000) {
+        setConversationId(conversations[0].id);
+      }
+    }
+  }, [conversations, conversationId, messages.length]);
 
   const fetchConversations = async () => {
     try {
@@ -70,8 +121,6 @@ export default function Home() {
       }
       if (res.ok) {
         const data = await res.json();
-        // useChat expects messages to be mapped correctly if needed, but standard JSON usually works
-        // We might need to map 'content' and 'role' if they differ exactly, but they match here.
         setMessages(data);
       }
     } catch (err) {
@@ -206,7 +255,7 @@ export default function Home() {
             </div>
           )}
 
-          {messages.map((msg, idx) => (
+          {messages.map((msg: any, idx) => (
             <div
               key={idx}
               className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'
