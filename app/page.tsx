@@ -22,6 +22,7 @@ export default function Home() {
 
   // useChat options limited to known properties to satisfy strict types
   const { messages, sendMessage, status, setMessages } = useChat({
+    streamProtocol: 'text',
     initialMessages: [], // Wait, initialMessages failed before? 
     // Yes, log 178: "initialMessages does not exist".
     // I MUST REMOVE IT.
